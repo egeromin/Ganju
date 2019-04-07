@@ -1,12 +1,14 @@
 module Ganju
 
+using Printf: @printf
+
 using Flux, Flux.Data.MNIST  # julia ML library
 using Flux.Tracker
 using Flux.Tracker: update!
 using Flux: binarycrossentropy
 
 
-export get_mnist, training_loop!, make_generator, make_discriminator
+export get_mnist, training_loop!, make_generator, make_discriminator, TrainingModel
 
 
 # target: generate digits using MNIST data
@@ -62,53 +64,72 @@ end
 # end
 
 
-function training_loop!(gen, disc, k::Int, num_epochs::Int, batch_size::Int)
+struct TrainingModel
+    gen
+    disc
+    discr_losses
+    gen_losses
 
-    disc_opt = Descent(0.001)  # TODO: why does this not work with Momentum?
-    gen_opt = Descent(0.001)
+    TrainingModel() = new(make_generator(),
+                          make_discriminator(),
+                          [], [])
+end
+
+
+function training_loop!(model::TrainingModel, k::Int, num_epochs::Int,
+                        batch_size::Int)
+    disc_opt = ADAM()  # TODO: why does this not work with Momentum?
+    gen_opt = ADAM()
+
+    # disc_opt = Descent(0.0001)
+    # gen_opt = Descent(0.0001)
+
+    function training_step!(opt, model, predictions, labels, losses)
+        function model_loss()
+            EPS = 0.0001
+            loss = sum(binarycrossentropy.((1-EPS)*predictions[:].+EPS/2, labels)) / batch_size
+            # manually add an epsilon term for numerical stability
+            push!(losses, loss)
+            return loss
+        end
+
+        pars = params(model)
+        grads = Tracker.gradient(model_loss, pars)
+
+        for p in pars
+            update!(opt, p, grads[p])
+        end
+    end
 
     for i in 1:num_epochs
-        for batch in get_mnist(batch_size)
-            println("la")
+        @printf "epoch %d\n" i
+        for (j, batch) in enumerate(get_mnist(batch_size))
             batch = map(Float32, hcat([reshape(z, :) for z in batch]...))
             # reshape and
             # collect along new axis
 
-            fake_samples = gen(rand(INPUT_DIM_GEN, batch_size))
+            fake_samples = model.gen(rand(INPUT_DIM_GEN, batch_size))
             all_samples = [batch fake_samples]
             @assert size(all_samples) == (INPUT_DIM_DIS, 2*batch_size)
 
             labels = [repeat([Float32(1.0)], batch_size); 
                       repeat([Float32(0.0)], batch_size)]
 
-            predictions = disc(all_samples)
+            predictions = model.disc(all_samples)
 
             @assert size(labels) == size(predictions[:])
 
-            discr_loss = () -> sum(binarycrossentropy.(predictions[:],
-                                                       labels)) / batch_size
-            pars = params(disc)
-            grads = Tracker.gradient(discr_loss, pars)
+            training_step!(disc_opt, model.disc, predictions, labels,
+                           model.discr_losses)
 
-            for p in pars
-                update!(disc_opt, p, grads[p])
-            end
-
-            # TODO: use k
-
-            predictions = disc(gen(rand(INPUT_DIM_GEN, batch_size)))
-            labels = repeat([Float32(0.0)], batch_size) 
-            gen_loss = () -> sum(binarycrossentropy.(predictions[:], labels)) / batch_size
-            pars = params(gen)
-            grads = Tracker.gradient(gen_loss, pars)
-
-            for p in pars
-                update!(disc_opt, p, grads[p])
+            if j % k == 0
+                predictions = model.disc(model.gen(rand(INPUT_DIM_GEN, batch_size)))
+                labels = repeat([Float32(0.0)], batch_size) 
+                training_step!(gen_opt, model.disc, predictions, labels,
+                               model.gen_losses)
             end
         end
-
     end
-
 end
 
 
